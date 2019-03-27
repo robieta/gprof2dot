@@ -21,6 +21,7 @@
 __author__ = "Jose Fonseca et al"
 
 
+import collections
 import sys
 import math
 import os.path
@@ -688,6 +689,67 @@ class Profile(Object):
                 if inevent in call:
                     call[outevent] = ratio(call[inevent], self[inevent])
         self[outevent] = 1.0
+
+    def fuse(self, fusion_threshold=0.01):
+        fusion_threshold_sec = fusion_threshold * self.__getitem__(TOTAL_TIME)
+
+        called_by = collections.defaultdict(set)
+        for fn_id, fn in self.functions.items():
+            for called_fn_id in fn.calls.keys():
+                called_by[called_fn_id].add(fn_id)
+
+        fuse_roots = set()
+        for fn_id, caller_ids in called_by.items():
+
+            if len(caller_ids) != 1:
+                continue
+
+            fn_caller = list(caller_ids)[0]
+            if len(self.functions[fn_caller].calls) == 1:
+                continue
+
+            fn = self.functions[fn_id]
+            if len(fn.calls) != 1:
+                continue
+
+            called_id = list(fn.calls.keys())[0]
+            called_fn = self.functions[called_id]
+
+            if len(called_by[called_id]) != 1:
+                continue
+
+            if fn[TIME] + called_fn[TIME] <= fusion_threshold_sec:
+                fuse_roots.add(fn_id)
+
+        orphan_fns, orphan_calls = dict(), set()
+        for root_fn_id in fuse_roots:
+            root_fn = self.functions[root_fn_id]
+            while True:
+                if len(root_fn.calls) != 1:
+                    break
+
+                called_fn_id, call_edge = list(root_fn.calls.items())[0]
+                called_fn = self.functions[called_fn_id]
+
+                if len(called_by[called_fn_id]) != 1:
+                    break
+
+                fused_time = root_fn[TIME] + called_fn[TIME]
+                if fused_time > fusion_threshold_sec:
+                    break
+
+                root_fn[TIME] = fused_time
+                root_fn[TOTAL_TIME] = max([root_fn[TOTAL_TIME], called_fn[TOTAL_TIME]])
+                root_fn.name = "{}    -->\n  {}".format(root_fn.name, called_fn.name)
+                root_fn.calls = called_fn.calls
+
+                if call_edge in orphan_calls:
+                    raise ValueError("Already processed call {}".format(call_edge))
+                orphan_calls.add(call_edge)
+                orphan_fns[called_fn_id] = called_fn
+
+        for orphan_id in orphan_fns.keys():
+            self.functions.pop(orphan_id)
 
     def prune(self, node_thres, edge_thres, paths, color_nodes_by_selftime):
         """Prune the profile"""
@@ -3332,7 +3394,9 @@ def main():
         dot.show_function_events.append(SAMPLES)
 
     profile = profile
+
     profile.prune(options.node_thres/100.0, options.edge_thres/100.0, options.filter_paths, options.color_nodes_by_selftime)
+    profile.fuse()
 
     if options.root:
         rootIds = profile.getFunctionIds(options.root)
